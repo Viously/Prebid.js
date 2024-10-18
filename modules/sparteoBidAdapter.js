@@ -24,6 +24,8 @@ const converter = ortbConverter({
   request(buildRequest, imps, bidderRequest, context) {
     const request = buildRequest(imps, bidderRequest, context);
 
+    deepSetValue(request, 'site.publisher.ext.params.pbjsVersion', '$prebid.version$');
+
     if (bidderRequest.bids[0].params.networkId) {
       deepSetValue(request, 'site.publisher.ext.params.networkId', bidderRequest.bids[0].params.networkId);
     }
