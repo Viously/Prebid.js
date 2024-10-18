@@ -119,7 +119,10 @@ export const spec = {
     return {
       method: HTTP_METHOD,
       url: bidRequests[0].params.endpoint ? bidRequests[0].params.endpoint : REQUEST_URL,
-      data: payload
+      data: payload,
+      options: {
+        contentType: 'application/json'
+      }
     };
   },
 

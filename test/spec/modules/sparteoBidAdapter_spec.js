@@ -57,6 +57,9 @@ const VALID_BID_VIDEO = {
 const VALID_REQUEST_BANNER = {
   method: HTTP_METHOD,
   url: REQUEST_URL,
+  options: {
+    contentType: 'application/json'
+  },
   data: {
     'imp': [{
       'id': '1a2b3c4d',
@@ -92,6 +95,9 @@ const VALID_REQUEST_BANNER = {
 const VALID_REQUEST_VIDEO = {
   method: HTTP_METHOD,
   url: REQUEST_URL,
+  options: {
+    contentType: 'application/json'
+  },
   data: {
     'imp': [{
       'id': '5e6f7g8h',
@@ -133,6 +139,9 @@ const VALID_REQUEST_VIDEO = {
 const VALID_REQUEST = {
   method: HTTP_METHOD,
   url: REQUEST_URL,
+  options: {
+    contentType: 'application/json'
+  },
   data: {
     'imp': [{
       'id': '1a2b3c4d',
