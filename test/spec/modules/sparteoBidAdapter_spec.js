@@ -802,7 +802,9 @@ describe('SparteoAdapter', function () {
         expect(window.sparteoCrossfire).to.be.undefined;
       });
 
-      it('should return the sync url with GDPR, USP and GPP consent params', function () {
+      // Same ordering constraint as above: this call flips `isSynced`, so it must stay the last
+      // test that exercises the url-returning path.
+      it('should return the sync url with GDPR, USP, GPP and COPPA consent params', function () {
         const syncOptions = {
           'iframeEnabled': true,
           'pixelEnabled': false
@@ -816,13 +818,14 @@ describe('SparteoAdapter', function () {
           gppString: 'DBACNYA~CPXxRfAPXxRfAAfKABENB-CgAAAAAAAAAAYgAAAAAAAA',
           applicableSections: [2, 6]
         };
+        const coppa = true;
 
         const syncUrls = [{
           type: 'iframe',
-          url: USER_SYNC_URL_IFRAME + '&gdpr=1&gdpr_consent=tcfv2&usp_consent=1Y---&gpp=' + encodeURIComponent('DBACNYA~CPXxRfAPXxRfAAfKABENB-CgAAAAAAAAAAYgAAAAAAAA') + '&gpp_sid=' + encodeURIComponent('2,6')
+          url: USER_SYNC_URL_IFRAME + '&gdpr=1&gdpr_consent=tcfv2&usp_consent=1Y---&gpp=' + encodeURIComponent('DBACNYA~CPXxRfAPXxRfAAfKABENB-CgAAAAAAAAAAYgAAAAAAAA') + '&gpp_sid=' + encodeURIComponent('2,6') + '&coppa=1'
         }];
 
-        expect(adapter.getUserSyncs(syncOptions, null, gdprConsent, uspConsent, gppConsent)).to.deep.equal(syncUrls);
+        expect(adapter.getUserSyncs(syncOptions, null, gdprConsent, uspConsent, gppConsent, coppa)).to.deep.equal(syncUrls);
       });
     });
   });

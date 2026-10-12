@@ -266,7 +266,7 @@ export const spec = {
     return bids;
   },
 
-  getUserSyncs: function (syncOptions, serverResponses, gdprConsent, uspConsent, gppConsent) {
+  getUserSyncs: function (syncOptions, serverResponses, gdprConsent, uspConsent, gppConsent, coppa) {
     let syncurl = '';
 
     if (!isSynced && !window.sparteoCrossfire?.started) {
@@ -281,6 +281,9 @@ export const spec = {
       if (gppConsent) {
         syncurl += '&gpp=' + encodeURIComponent(gppConsent.gppString || '');
         syncurl += '&gpp_sid=' + encodeURIComponent((gppConsent.applicableSections || []).join(','));
+      }
+      if (coppa) {
+        syncurl += '&coppa=1';
       }
 
       if (syncOptions.iframeEnabled) {
