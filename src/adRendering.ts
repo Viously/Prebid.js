@@ -5,8 +5,8 @@ import {
   insertElement,
   logError,
   logWarn,
+  politeTriggerPixel,
   replaceMacros,
-  triggerPixel
 } from './utils.js';
 import * as events from './events.js';
 import { AD_RENDER_FAILED_REASON, BID_STATUS, EVENTS, MESSAGES, PB_LOCATOR } from './constants.js';
@@ -59,7 +59,7 @@ declare module './events' {
 
 export const markWinningBid = hook('sync', function (bid) {
   (parseEventTrackers(bid.eventtrackers)[EVENT_TYPE_WIN]?.[TRACKER_METHOD_IMG] || [])
-    .forEach(url => triggerPixel(url));
+    .forEach(url => politeTriggerPixel(url));
   events.emit(BID_WON, bid);
   auctionManager.addWinningBid(bid);
 });
@@ -200,6 +200,7 @@ function creativeMessageHandler(deps) {
 
 type RenderOptions = {
   clickUrl?: string;
+  viewUrl?: string;
 };
 
 export const getRenderingData = hook('sync', function (bidResponse: Bid, options?: RenderOptions): Record<string, any> {
@@ -301,6 +302,9 @@ doRender.before(function (next, args) {
 }, 100);
 
 export function handleRender({ renderFn, resizeFn, adId, options, bidResponse, doc }) {
+  if (bidResponse != null && options?.viewUrl != null) {
+    bidResponse.viewUrl = options.viewUrl;
+  }
   deferRendering(bidResponse, () => {
     if (bidResponse == null) {
       emitAdRenderFail({
@@ -415,7 +419,13 @@ export const renderAdDirect = yieldsIf(() => !legacyRender, function renderAdDir
   }
 
   function renderFn(adData) {
-    if (adData.ad && legacyRender) {
+    // This condition was authored by a bot (Claude Code).
+    // `legacyRender` is meant for creatives that break on the extra iframe added in 10.12; a safe
+    // renderer's script is written against the `pbRenderInFrame` contract and expects to run inside
+    // that frame, so it is never one of those. Writing the markup here would also bypass doRender's
+    // PREVENT_WRITING_ON_MAIN_DOCUMENT guard: for a main-document or video bid, `safeRenderer.url`
+    // is the only thing that exempted this bid from it.
+    if (adData.ad && legacyRender && !getSafeRenderer(bid)) {
       doc.write(adData.ad);
       doc.close();
       emitAdRenderSucceeded({ doc, bid, id: bid.adId });
@@ -444,7 +454,7 @@ export const renderAdDirect = yieldsIf(() => !legacyRender, function renderAdDir
       fail(AD_RENDER_FAILED_REASON.MISSING_DOC_OR_ADID, `missing ${adId ? 'doc' : 'adId'}`);
     } else {
       bid = auctionManager.findBidByAdId(adId);
-      handleRender({ renderFn, resizeFn, adId, options: { clickUrl: options?.clickThrough }, bidResponse: bid, doc });
+      handleRender({ renderFn, resizeFn, adId, options: { clickUrl: options?.clickThrough, viewUrl: options?.viewUrl }, bidResponse: bid, doc });
     }
   } catch (e) {
     fail(EXCEPTION, e.message);

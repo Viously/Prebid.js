@@ -6,11 +6,12 @@ import adapterManager, {
 } from '../adapterManager.js';
 import { config } from '../config.js';
 import { BannerBid, Bid, BidResponse, createBid } from '../bidfactory.js';
-import { type SyncType, userSync } from '../userSync.js';
+import { type UserSync, userSync } from '../userSync.js';
 import { nativeBidIsValid } from '../native.js';
 import { isValidVideoBid } from '../video.js';
 import { EVENTS, REJECTION_REASON, DEBUG_MODE } from '../constants.js';
 import * as events from '../events.js';
+import { parseUntrustedJSON } from '../utils/untrustedJson.js';
 
 import {
   delayExecution,
@@ -35,13 +36,13 @@ import { useMetrics } from '../utils/perfMetrics.js';
 import { isActivityAllowed } from '../activities/rules.js';
 import { activityParams } from '../activities/activityParams.js';
 import { MODULE_TYPE_BIDDER } from '../activities/modules.js';
-import { ACTIVITY_TRANSMIT_TID, ACTIVITY_TRANSMIT_UFPD } from '../activities/activities.js';
+import { ACTIVITY_TRANSMIT_TID } from '../activities/activities.js';
 import type { AnyFunction, Wraps } from "../types/functions.d.ts";
 import type { BidderCode, StorageDisclosure } from "../types/common.d.ts";
 import type { Ajax, AjaxOptions, XHR } from "../ajax.ts";
 import type { AddBidResponse } from "../auction.ts";
 import type { MediaType } from "../mediaTypes.ts";
-import { CONSENT_GDPR, CONSENT_GPP, CONSENT_USP, type ConsentDataForKey } from "../consentHandler.ts";
+import { CONSENT_GDPR, CONSENT_GPP, CONSENT_USP, coppaDataHandler, type ConsentDataForKey } from "../consentHandler.ts";
 
 /**
  * This file aims to support Adapters during the Prebid 0.x -> 1.x transition.
@@ -91,6 +92,7 @@ import { CONSENT_GDPR, CONSENT_GPP, CONSENT_USP, type ConsentDataForKey } from "
  *
  * @property {('image'|'iframe')} type The type of user sync to be done.
  * @property {string} url The URL which makes the sync happen.
+ * @property {function} [onCleanup] Releases work associated with an iframe when it is removed.
  */
 
 // common params for all mediaTypes
@@ -135,7 +137,14 @@ export interface BidderSpec<BIDDER extends BidderCode> extends StorageDisclosure
    * @see https://iabeurope.eu/tcf-for-vendors/
    */
   gvlid?: number;
-  aliases?: readonly (BidderCode | { code: BidderCode, gvlid?: number, skipPbsAliasing?: boolean })[];
+  /**
+   * Google Additional Consent provider ID, for vendors that are not on the GVL.
+   * Used by the TCF control module to check vendor consent against the CMP's Additional Consent string
+   * when the module has no GVL ID. This is a different ID space from GVL IDs.
+   * @see https://support.google.com/admanager/answer/9681920
+   */
+  acpId?: number;
+  aliases?: readonly (BidderCode | { code: BidderCode, gvlid?: number, acpId?: number, skipPbsAliasing?: boolean })[];
   isBidRequestValid(request: BidRequest<BIDDER>): boolean;
   buildRequests(validBidRequests: BidRequest<BIDDER>[], bidderRequest: ClientBidderRequest<BIDDER>): AdapterRequest | AdapterRequest[];
   interpretResponse(response: ServerResponse, request: AdapterRequest): AdapterResponse;
@@ -155,8 +164,9 @@ export interface BidderSpec<BIDDER extends BidderCode> extends StorageDisclosure
     responses: ServerResponse[],
     gdprConsent: null | ConsentDataForKey<typeof CONSENT_GDPR>,
     uspConsent: null | ConsentDataForKey<typeof CONSENT_USP>,
-    gppConsent: null | ConsentDataForKey<typeof CONSENT_GPP>
-  ) => ({ type: SyncType, url: string })[];
+    gppConsent: null | ConsentDataForKey<typeof CONSENT_GPP>,
+    coppa: boolean
+  ) => UserSync[];
   alwaysHasCapacity?: boolean;
 }
 
@@ -185,19 +195,21 @@ export function registerBidder<B extends BidderCode>(spec: BidderSpec<B>) {
     spec.aliases.forEach(alias => {
       let aliasCode: string = alias as any;
       let gvlid;
+      let acpId;
       let skipPbsAliasing;
       if (isPlainObject(alias)) {
         aliasCode = alias.code as string;
         gvlid = alias.gvlid;
+        acpId = alias.acpId;
         skipPbsAliasing = alias.skipPbsAliasing;
       }
       adapterManager.aliasRegistry[aliasCode] = spec.code;
-      putBidder(Object.assign({}, spec, { code: aliasCode, gvlid, skipPbsAliasing }));
+      putBidder(Object.assign({}, spec, { code: aliasCode, gvlid, acpId, skipPbsAliasing }));
     });
   }
 }
 
-export const guardTids: any = memoize(({ bidderCode }) => {
+function makeTidGuard({ bidderCode }) {
   const tidsAllowed = isActivityAllowed(ACTIVITY_TRANSMIT_TID, activityParams(MODULE_TYPE_BIDDER, bidderCode));
   function get(target, prop, receiver) {
     if (TIDS.hasOwnProperty(prop)) {
@@ -232,7 +244,21 @@ export const guardTids: any = memoize(({ bidderCode }) => {
       }
     })
   };
-});
+}
+
+// Guards are cached per bidderRequest, so every use of the same request sees
+// the same guard: stable proxy identity, and one transmitTid activity check
+// per bidder request. The cache is keyed weakly, so an entry cannot outlive
+// the bidderRequest it guards.
+const tidGuards = new WeakMap<object, ReturnType<typeof makeTidGuard>>();
+export function guardTids<B extends BidderCode>(bidderRequest: ClientBidderRequest<B>) {
+  let guard = tidGuards.get(bidderRequest);
+  if (guard == null) {
+    guard = makeTidGuard(bidderRequest);
+    tidGuards.set(bidderRequest, guard);
+  }
+  return guard;
+}
 
 declare module '../events' {
   interface Events {
@@ -454,9 +480,9 @@ export const processBidderRequests = hook('async', function<B extends BidderCode
     // If the adapter code fails, no bids should be added. After all the bids have been added,
     // make sure to call the `requestDone` function so that we're one step closer to calling onCompletion().
     const onSuccess = wrapCallback(function(response, responseObj) {
-      networkDone();
+      networkDone?.();
       try {
-        response = JSON.parse(response);
+        response = parseUntrustedJSON(response);
       } catch (e) { /* response might not be JSON... that's ok. */ }
 
       // Make response headers available for #1742. These are lazy-loaded because most adapters won't need them.
@@ -502,37 +528,39 @@ export const processBidderRequests = hook('async', function<B extends BidderCode
     });
 
     const onFailure = wrapCallback(function (errorMessage, error) {
-      networkDone();
+      networkDone?.();
       onError(errorMessage, error);
       requestDone();
     });
 
     onRequest(request);
 
-    const networkDone = requestMetrics.startTiming('net');
+    let networkDone;
 
     const debugMode = getParameterByName(DEBUG_MODE).toUpperCase() === 'TRUE' || debugTurnedOn();
 
     function getOptions(defaults) {
-      const ro = request.options;
-      return Object.assign(defaults, ro, {
-        browsingTopics: ro?.hasOwnProperty('browsingTopics') && !ro.browsingTopics
-          ? false
-          : (bidderSettings.get(spec.code, 'topicsHeader') ?? true) && isActivityAllowed(ACTIVITY_TRANSMIT_UFPD, activityParams(MODULE_TYPE_BIDDER, spec.code)),
-        suppressTopicsEnrollmentWarning: ro?.hasOwnProperty('suppressTopicsEnrollmentWarning')
-          ? ro.suppressTopicsEnrollmentWarning
-          : !debugMode
-      });
+      return Object.assign(defaults, request.options);
     }
+
+    // start network timer here so we do not include the compression time in `net` metric
+    const doAjax = (url: string, payload: unknown, options: AjaxOptions) => {
+      networkDone = requestMetrics.startTiming('net');
+      ajax(
+        url,
+        {
+          success: onSuccess,
+          error: onFailure
+        },
+        payload,
+        options
+      );
+    };
 
     switch (request.method) {
       case 'GET':
-        ajax(
+        doAjax(
           `${request.url}${formatGetParameters(request.data)}`,
-          {
-            success: onSuccess,
-            error: onFailure
-          },
           undefined,
           getOptions({
             method: 'GET',
@@ -543,12 +571,8 @@ export const processBidderRequests = hook('async', function<B extends BidderCode
       case 'POST':
         const enableGZipCompression = request.options?.endpointCompression;
         const callAjax = ({ url, payload }) => {
-          ajax(
+          doAjax(
             url,
-            {
-              success: onSuccess,
-              error: onFailure
-            },
             payload,
             getOptions({
               method: 'POST',
@@ -562,16 +586,25 @@ export const processBidderRequests = hook('async', function<B extends BidderCode
           logWarn(`Skipping GZIP compression for ${spec.code} as debug mode is enabled`);
         }
 
-        if (enableGZipCompression && !debugMode && isGzipCompressionSupported()) {
-          compressDataWithGZip(request.data).then(compressedPayload => {
-            const url = new URL(request.url);
-            if (!url.searchParams.has('gzip')) {
-              url.searchParams.set('gzip', '1');
+        const sendUncompressed = wrapCallback(() => callAjax({ url: request.url, payload: typeof request.data === 'string' ? request.data : JSON.stringify(request.data) }));
+
+        if (enableGZipCompression && !debugMode) {
+          isGzipCompressionSupported().then(wrapCallback((supported) => {
+            if (supported) {
+              return compressDataWithGZip(request.data)
+                .then(wrapCallback(compressedPayload => {
+                  const url = new URL(request.url);
+                  if (!url.searchParams.has('gzip')) {
+                    url.searchParams.set('gzip', '1');
+                  }
+                  callAjax({ url: url.href, payload: compressedPayload });
+                }));
+            } else {
+              sendUncompressed();
             }
-            callAjax({ url: url.href, payload: compressedPayload });
-          });
+          })).catch(sendUncompressed);
         } else {
-          callAjax({ url: request.url, payload: typeof request.data === 'string' ? request.data : JSON.stringify(request.data) });
+          sendUncompressed();
         }
         break;
       default:
@@ -595,13 +628,13 @@ export const registerSyncInner = hook('async', function(spec: BidderSpec<BidderC
     let syncs = spec.getUserSyncs({
       iframeEnabled: userSync.canBidderRegisterSync('iframe', spec.code),
       pixelEnabled: userSync.canBidderRegisterSync('image', spec.code),
-    }, responses, gdprConsent, uspConsent, gppConsent);
+    }, responses, gdprConsent, uspConsent, gppConsent, coppaDataHandler.getCoppa());
     if (syncs) {
       if (!Array.isArray(syncs)) {
         syncs = [syncs];
       }
       syncs.forEach((sync) => {
-        userSync.registerSync(sync.type, spec.code, sync.url);
+        userSync.registerSync(sync.type, spec.code, sync.url, sync.onCleanup);
       });
       userSync.bidderDone(spec.code);
     }

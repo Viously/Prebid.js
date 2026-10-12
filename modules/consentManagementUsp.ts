@@ -13,6 +13,7 @@ import { enrichFPD } from '../src/fpd/enrichment.js';
 import { cmpClient } from '../libraries/cmp/cmpClient.js';
 import type { IABCMConfig, StaticCMConfig } from "../libraries/consentManagement/cmUtils.ts";
 import type { CONSENT_USP } from "../src/consentHandler.ts";
+import type { USPConsentData } from "../src/types/consent/usp.d.ts";
 
 const DEFAULT_CONSENT_API = 'iab';
 const DEFAULT_CONSENT_TIMEOUT = 50;
@@ -22,7 +23,6 @@ export let consentAPI = DEFAULT_CONSENT_API;
 export let consentTimeout = DEFAULT_CONSENT_TIMEOUT;
 export let staticConsentData;
 
-type USPConsentData = string;
 type BaseUSPConfig = {
   /**
    * Length of time (in milliseconds) to delay auctions while waiting for consent data from the CMP.
@@ -39,9 +39,6 @@ type StaticUSPData = {
 type USPCMConfig = BaseUSPConfig & (IABCMConfig | StaticCMConfig<StaticUSPData>);
 
 declare module '../src/consentHandler' {
-  interface ConsentData {
-    [CONSENT_USP]: USPConsentData;
-  }
   interface ConsentManagementConfig {
     [CONSENT_USP]?: USPCMConfig;
   }
@@ -49,6 +46,14 @@ declare module '../src/consentHandler' {
 
 let consentData;
 let enabled = false;
+// Codex bot: keep the CMP deletion listener singleton across repeated consent lookups.
+let deletionRequestRegistered = false;
+
+export const _internal = {
+  resetDeletionRequestRegistration() {
+    deletionRequestRegistered = false;
+  }
+};
 
 // consent APIs
 const uspCallMap = {
@@ -115,12 +120,16 @@ function lookupUspConsent({ onSuccess, onError }) {
     callback: callbackHandler.consentDataCallback
   });
 
-  cmp({
-    command: 'registerDeletion',
-    callback: (res, success) => (success == null || success) && adapterManager.callDataDeletionRequest(res)
-  }).catch(e => {
-    logError('Error invoking CMP `registerDeletion`:', e);
-  });
+  if (!deletionRequestRegistered) {
+    deletionRequestRegistered = true;
+    cmp({
+      command: 'registerDeletion',
+      callback: (res, success) => (success == null || success) && adapterManager.callDataDeletionRequest(res)
+    }).catch(e => {
+      deletionRequestRegistered = false;
+      logError('Error invoking CMP `registerDeletion`:', e);
+    });
+  }
 }
 
 /**

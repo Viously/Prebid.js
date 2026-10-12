@@ -104,6 +104,12 @@ describe('ReklamupBidAdapter', function () {
     timeout: 500
   };
 
+  describe('spec', function () {
+    it('should have the correct gvlid', function () {
+      expect(spec.gvlid).to.equal(1619);
+    });
+  });
+
   describe('isBidRequestValid', function () {
     it('Should return true if there are bidId, params and key parameters present', function () {
       expect(spec.isBidRequestValid(bids[0])).to.be.true;
@@ -238,6 +244,50 @@ describe('ReklamupBidAdapter', function () {
             break;
         }
       }
+    });
+
+    describe('region routing', function () {
+      let dtfStub;
+
+      function stubTimezone(tz) {
+        dtfStub = sinon.stub(Intl, 'DateTimeFormat').returns({
+          resolvedOptions: () => ({ timeZone: tz }),
+          format: () => ''
+        });
+      }
+
+      afterEach(function () {
+        if (dtfStub) {
+          dtfStub.restore();
+          dtfStub = null;
+        }
+      });
+
+      const bid = {
+        bidId: getUniqueIdentifierStr(),
+        bidder: bidder,
+        mediaTypes: { [BANNER]: { sizes: [[300, 250]] } },
+        params: { placementId: 'testBanner' },
+        userIdAsEids
+      };
+
+      it('routes to eu-node for European timezones', function () {
+        stubTimezone('Europe/London');
+        const request = spec.buildRequests([bid], bidderRequest);
+        expect(request.url).to.equal('https://eu-node.reklamup.com/pbjs');
+      });
+
+      it('routes to node for American timezones', function () {
+        stubTimezone('America/New_York');
+        const request = spec.buildRequests([bid], bidderRequest);
+        expect(request.url).to.equal('https://node.reklamup.com/pbjs');
+      });
+
+      it('falls back to node for unknown timezones', function () {
+        stubTimezone('Unknown/Region');
+        const request = spec.buildRequests([bid], bidderRequest);
+        expect(request.url).to.equal('https://node.reklamup.com/pbjs');
+      });
     });
 
     it('Returns data with gdprConsent and without uspConsent', function () {
